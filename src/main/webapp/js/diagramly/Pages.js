@@ -330,10 +330,13 @@ EditorUi.prototype.initPages = function()
 		{
 			this.selectNextPage(true);
 		}));
-		
-		this.keyHandler.bindAction(33, true, 'previousPage', true); // Ctrl+Shift+PageUp
-		this.keyHandler.bindAction(34, true, 'nextPage', true); // Ctrl+Shift+PageDown
-		
+
+		if (this.isPagesEnabled())
+		{
+			this.keyHandler.bindAction(33, true, 'previousPage', true); // Ctrl+Shift+PageUp
+			this.keyHandler.bindAction(34, true, 'nextPage', true); // Ctrl+Shift+PageDown
+		}
+			
 		// Updates the tabs after loading the diagram
 		var graph = this.editor.graph;
 		var graphViewValidateBackground = graph.view.validateBackground; 
@@ -708,7 +711,7 @@ Graph.prototype.setViewState = function(state, removeOldExtFonts)
 	{
 		this.view.currentRoot = null;
 		this.view.scale = 1;
-		this.gridEnabled = true;
+		this.gridEnabled = this.defaultGridEnabled;
 		this.gridSize = mxGraph.prototype.gridSize;
 		this.pageScale = mxGraph.prototype.pageScale;
 		this.pageFormat = (typeof mxSettings === 'undefined'? mxGraph.prototype.pageFormat : mxSettings.getPageFormat());
@@ -735,11 +738,17 @@ Graph.prototype.setViewState = function(state, removeOldExtFonts)
 	this.fireEvent(new mxEventObject('viewStateChanged', 'state', state));
 };
 
-//TODO How to make this function secure with no injection??
 Graph.prototype.addExtFont = function(fontName, fontUrl, dontRemember)
 {
+	// KNOWN: Font not added when pasting cells with custom fonts
 	if (fontName && fontUrl)
 	{
+		if (urlParams['ext-fonts'] != '1')
+		{
+			// Adds inserted fonts to font family menu
+			Graph.recentCustomFonts[fontName.toLowerCase()] = {name: fontName, url: fontUrl};
+		}
+		
 		var fontId = 'extFont_' + fontName;
 
 		if (document.getElementById(fontId) == null)
@@ -750,14 +759,16 @@ Graph.prototype.addExtFont = function(fontName, fontUrl, dontRemember)
 			}
 			else
 			{
+				var head = document.getElementsByTagName('head')[0];
+				
+				// KNOWN: Should load fonts synchronously
 				var style = document.createElement('style');
 				
 				style.appendChild(document.createTextNode('@font-face {\n' +
-			            '\tfont-family: "'+ fontName +'";\n' + 
-			            '\tsrc: url("'+ fontUrl +'");\n' + 
-			            '}'));
+					'\tfont-family: "'+ fontName +'";\n' + 
+					'\tsrc: url("'+ fontUrl +'");\n}'));
 				
-				style.setAttribute('id', fontId);				
+				style.setAttribute('id', fontId);
 				var head = document.getElementsByTagName('head')[0];
 		   		head.appendChild(style);
 			}
@@ -792,11 +803,11 @@ Graph.prototype.addExtFont = function(fontName, fontUrl, dontRemember)
 /**
  * Executes selection of a new page.
  */
-EditorUi.prototype.updatePageRoot = function(page)
+EditorUi.prototype.updatePageRoot = function(page, checked)
 {
 	if (page.root == null)
 	{
-		var node = this.editor.extractGraphModel(page.node);
+		var node = this.editor.extractGraphModel(page.node, null, checked);
 		var cause = Editor.extractParserError(node);
 		
 		if (cause)
@@ -1151,7 +1162,7 @@ EditorUi.prototype.updateTabContainer = function()
 		var graph = this.editor.graph;
 		var wrapper = document.createElement('div');
 		wrapper.style.position = 'relative';
-		wrapper.style.display = (mxClient.IS_QUIRKS) ? 'inline' : 'inline-block';
+		wrapper.style.display = 'inline-block';
 		wrapper.style.verticalAlign = 'top';
 		wrapper.style.height = this.tabContainer.style.height;
 		wrapper.style.whiteSpace = 'nowrap';
@@ -1319,7 +1330,7 @@ EditorUi.prototype.isPageInsertTabVisible = function()
 EditorUi.prototype.createTab = function(hoverEnabled)
 {
 	var tab = document.createElement('div');
-	tab.style.display = (mxClient.IS_QUIRKS) ? 'inline' : 'inline-block';
+	tab.style.display = 'inline-block';
 	tab.style.whiteSpace = 'nowrap';
 	tab.style.boxSizing = 'border-box';
 	tab.style.position = 'relative';
@@ -1424,20 +1435,21 @@ EditorUi.prototype.createPageMenuTab = function()
 				if (page != null)
 				{
 					menu.addSeparator(parent);
+					var pageName = page.getName();
 	
-					menu.addItem(mxResources.get('delete'), null, mxUtils.bind(this, function()
+					menu.addItem(mxResources.get('removeIt', [pageName]), null, mxUtils.bind(this, function()
 					{
 						this.removePage(page);
 					}), parent);
 					
-					menu.addItem(mxResources.get('rename'), null, mxUtils.bind(this, function()
+					menu.addItem(mxResources.get('renameIt', [pageName]), null, mxUtils.bind(this, function()
 					{
 						this.renamePage(page, page.getName());
 					}), parent);
 
 					menu.addSeparator(parent);
 					
-					menu.addItem(mxResources.get('duplicate'), null, mxUtils.bind(this, function()
+					menu.addItem(mxResources.get('duplicateIt', [pageName]), null, mxUtils.bind(this, function()
 					{
 						this.duplicatePage(page, mxResources.get('copyOf', [page.getName()]));
 					}), parent);
@@ -1582,7 +1594,7 @@ EditorUi.prototype.addTabListeners = function(page, tab)
  * Returns an absolute URL to the given page or null of absolute links
  * to pages are not supported in this file.
  */
-EditorUi.prototype.getLinkForPage = function(page)
+EditorUi.prototype.getLinkForPage = function(page, params, lightbox)
 {
 	if (!mxClient.IS_CHROMEAPP && !EditorUi.isElectronApp)
 	{
@@ -1590,10 +1602,20 @@ EditorUi.prototype.getLinkForPage = function(page)
 		
 		if (file != null && file.constructor != LocalFile && this.getServiceName() == 'draw.io')
 		{
-			var search = this.getSearch(['create', 'title', 'mode', 'url', 'drive', 'splash', 'state']);
+			var search = this.getSearch(['create', 'title', 'mode', 'url', 'drive', 'splash',
+				'state', 'clibs', 'ui', 'viewbox', 'hide-pages']);
 			search += ((search.length == 0) ? '?' : '&') + 'page-id=' + page.getId();
 			
-			return window.location.protocol + '//' + window.location.host + '/' + search + '#' + file.getHash();
+			if (params != null)
+			{
+				search += '&' + params.join('&');
+			}
+			
+			return ((lightbox && urlParams['dev'] != '1') ? EditorUi.lightboxHost :
+				(((mxClient.IS_CHROMEAPP || EditorUi.isElectronApp ||
+				!(/.*\.draw\.io$/.test(window.location.hostname))) ?
+				EditorUi.drawHost : 'https://' + window.location.host))) +
+				'/' + search + '#' + file.getHash();
 		}
 	}
 	
@@ -1626,17 +1648,43 @@ EditorUi.prototype.createPageMenu = function(page, label)
 		}), parent);
 		
 		var url = this.getLinkForPage(page);
-		
+
 		if (url != null)
 		{
 			menu.addSeparator(parent);
 			
 			menu.addItem(mxResources.get('link'), null, mxUtils.bind(this, function()
 			{
-				var dlg = new EmbedDialog(this, url);
-				this.showDialog(dlg.container, 440, 240, true, true);
-				dlg.init();
-			}), parent);
+				this.showPublishLinkDialog(mxResources.get('url'), true, null, null,
+					mxUtils.bind(this, function(linkTarget, linkColor, allPages, lightbox, editLink, layers)
+				{
+					var params = this.createUrlParameters(linkTarget, linkColor, allPages, lightbox, editLink, layers);
+					
+					if (!allPages)
+					{
+						params.push('hide-pages=1');
+					}
+					
+					if (!graph.isSelectionEmpty())
+					{
+						var bounds = graph.getBoundingBox(graph.getSelectionCells());
+								
+						var t = graph.view.translate;
+						var s = graph.view.scale;
+						bounds.width /= s;
+						bounds.height /= s;
+						bounds.x = bounds.x / s - t.x;
+						bounds.y = bounds.y / s - t.y;
+					
+						params.push('viewbox=' + encodeURIComponent(JSON.stringify({x: Math.round(bounds.x), y: Math.round(bounds.y),
+							width: Math.round(bounds.width), height: Math.round(bounds.height), border: 100})));
+					}
+					
+					var dlg = new EmbedDialog(this, this.getLinkForPage(page, params, lightbox));
+					this.showDialog(dlg.container, 440, 240, true, true);
+					dlg.init();
+				}));
+			}));
 		}
 		
 		menu.addSeparator(parent);
@@ -1645,6 +1693,16 @@ EditorUi.prototype.createPageMenu = function(page, label)
 		{
 			this.duplicatePage(page, mxResources.get('copyOf', [page.getName()]));
 		}), parent);
+		
+		if (!mxClient.IS_CHROMEAPP && !EditorUi.isElectronApp && this.getServiceName() == 'draw.io')
+		{		
+			menu.addSeparator(parent);
+			
+			menu.addItem(mxResources.get('openInNewWindow'), null, mxUtils.bind(this, function()
+			{
+				this.editor.editAsNew(this.getFileData(true, null, null, null, true, true));
+			}), parent);
+		}
 	});
 };
 
